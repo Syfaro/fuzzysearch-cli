@@ -1,0 +1,30 @@
+[package]
+name = "fuzzysearch-cli"
+version = "0.1.0"
+authors = ["Syfaro <syfaro@huefox.com>"]
+edition = "2018"
+description = "Match a large number of images against the FuzzySearch API"
+repository = "https://git.huefox.com/syfaro/fuzzysearch-cli"
+readme = "README.md"
+license = "MIT"
+
+[dependencies]
+clap = "2"
+pretty_env_logger = "0.3"
+tokio = { version = "0.2", features = ["full"] }
+img_hash = "3.0.0"
+image = "0.23"
+log = "0.4"
+walkdir = "2"
+futures = "0.3"
+reqwest = { version = "0.10", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.21", features = ["bundled", "serde_json"] }
+directories = "2"
+indicatif = "0.14"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
