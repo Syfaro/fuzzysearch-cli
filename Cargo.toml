@@ -4,14 +4,14 @@ version = "0.1.0"
 authors = ["Syfaro <syfaro@huefox.com>"]
 edition = "2018"
 description = "Match a large number of images against the FuzzySearch API"
-repository = "https://git.huefox.com/syfaro/fuzzysearch-cli"
+repository = "https://github.com/Syfaro/fuzzysearch-cli"
 readme = "README.md"
 license = "MIT"
 
 [dependencies]
 clap = "2"
 pretty_env_logger = "0.4"
-tokio = { version = "0.3", features = ["full"] }
+tokio = { version = "0.2", features = ["full"] }
 img_hash = "3"
 image = "0.23"
 log = "0.4"

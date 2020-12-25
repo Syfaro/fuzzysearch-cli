@@ -417,7 +417,7 @@ async fn main() {
                     Ok(hashes) => break hashes,
                     Err(_err) => {
                         warn!("Got API error, retrying in 30 seconds");
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        tokio::time::delay_for(std::time::Duration::from_secs(30)).await;
                     }
                 }
             };
@@ -447,7 +447,7 @@ async fn main() {
 
         let delay: i32 = 61 - (start.elapsed().as_secs() as i32);
         if delay > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(delay as u64)).await;
+            tokio::time::delay_for(std::time::Duration::from_secs(delay as u64)).await;
         }
     }
 
