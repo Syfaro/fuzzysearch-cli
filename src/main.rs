@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::path::Path;
 
-use clap::{value_t, App, Arg};
+use clap::Parser;
 use futures::stream::StreamExt;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -148,6 +149,40 @@ async fn get_hashes(api_key: &str, hashes: &[i64]) -> reqwest::Result<HashMap<i6
     Ok(items)
 }
 
+#[derive(Parser)]
+#[clap(name = env!("CARGO_PKG_NAME"), version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = env!("CARGO_PKG_DESCRIPTION"))]
+struct Opts {
+    /// Maximun number of images to hash at once
+    #[clap(short, long, default_value = "8")]
+    concurrency: usize,
+    /// FuzzySearch API key
+    #[clap(long)]
+    api_key: String,
+    /// API limit per minute
+    #[clap(short, long, default_value = "60")]
+    limit: i32,
+    /// Move matched items to directory
+    #[clap(long)]
+    move_matched: Option<String>,
+    /// Move matched items to directory
+    #[clap(long)]
+    move_unmatched: Option<String>,
+    /// Path to folder containing images
+    directory: String,
+    /// How to output source information
+    #[clap(arg_enum)]
+    action: Action,
+    /// Where to output source information
+    #[clap(default_value = "sources.txt")]
+    output: String,
+}
+
+#[derive(Debug, clap::ArgEnum, Clone)]
+enum Action {
+    AllSources,
+    PerFile,
+}
+
 #[tokio::main]
 async fn main() {
     if std::env::var("RUST_LOG").is_err() {
@@ -156,84 +191,19 @@ async fn main() {
 
     pretty_env_logger::init();
 
-    let matches = App::new(env!("CARGO_PKG_NAME"))
-        .version(env!("CARGO_PKG_VERSION"))
-        .author(env!("CARGO_PKG_AUTHORS"))
-        .about(env!("CARGO_PKG_DESCRIPTION"))
-        .arg(
-            Arg::with_name("directory")
-                .index(1)
-                .takes_value(true)
-                .required(true)
-                .help("Folder to look for images in"),
-        )
-        .arg(
-            Arg::with_name("output")
-                .index(2)
-                .takes_value(true)
-                .required(false)
-                .default_value("output.txt")
-                .help("File where duplicates information is saved"),
-        )
-        .arg(
-            Arg::with_name("concurrency")
-                .short("c")
-                .long("concurrency")
-                .takes_value(true)
-                .required(false)
-                .default_value("8")
-                .help("Maximun number of images to hash at once"),
-        )
-        .arg(
-            Arg::with_name("key")
-                .short("k")
-                .long("key")
-                .takes_value(true)
-                .required(true)
-                .help("Your FuzzySearch API key"),
-        )
-        .arg(
-            Arg::with_name("limit")
-                .short("l")
-                .long("limit")
-                .takes_value(true)
-                .required(false)
-                .help("API limit per minute")
-                .default_value("60"),
-        )
-        .arg(
-            Arg::with_name("move-matched")
-                .long("move-matched")
-                .takes_value(true)
-                .required(false)
-                .help("Move matched items to directory"),
-        )
-        .arg(
-            Arg::with_name("move-unmatched")
-                .long("move-unmatched")
-                .takes_value(true)
-                .required(false)
-                .help("Move unmatched items to directory"),
-        )
-        .get_matches();
+    let opts = Opts::parse();
 
-    let dir = matches.value_of("directory").unwrap();
-    let output = matches.value_of("output").unwrap();
-    let buffer_size = value_t!(matches, "concurrency", usize).unwrap_or_else(|e| e.exit());
-    let api_key = matches.value_of("key").unwrap();
-    let api_limit = value_t!(matches, "limit", i32).unwrap_or_else(|e| e.exit());
-    let move_matched = matches.value_of("move-matched").map(std::path::Path::new);
-    let move_unmatched = matches.value_of("move-unmatched").map(std::path::Path::new);
-
-    if let Some(move_matched) = move_matched {
-        if !move_matched.exists() {
+    if let Some(move_matched) = &opts.move_matched {
+        let path = Path::new(move_matched);
+        if !path.exists() {
             error!("Move matched directory does not exist");
             std::process::exit(1);
         }
     }
 
-    if let Some(move_unmatched) = move_unmatched {
-        if !move_unmatched.exists() {
+    if let Some(move_unmatched) = &opts.move_unmatched {
+        let path = Path::new(move_unmatched);
+        if !path.exists() {
             error!("Move unmatched directory does not exist");
             std::process::exit(1);
         }
@@ -277,7 +247,8 @@ async fn main() {
     let mut insert_stmt = conn
         .prepare("INSERT INTO cache (path) VALUES (?1)")
         .expect("Unable to prepare cache insert query");
-    for entry in walkdir::WalkDir::new(dir) {
+
+    for entry in walkdir::WalkDir::new(&opts.directory) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
@@ -343,7 +314,7 @@ async fn main() {
             .into_iter()
             .map(|file| hash_image(file.0, file.1)),
     )
-    .buffer_unordered(buffer_size)
+    .buffer_unordered(opts.concurrency)
     .filter_map(futures::future::ready)
     .for_each(|hash| {
         conn.execute(
@@ -385,14 +356,16 @@ async fn main() {
     let pb = indicatif::ProgressBar::new(count as u64);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
             .progress_chars("#>-"),
     );
     pb.enable_steady_tick(100);
 
     loop {
         let rows: Vec<(i32, i64)> = stmt
-            .query_map(rusqlite::params![&api_limit], |row| {
+            .query_map(rusqlite::params![&opts.limit], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .expect("Unable to lookup items needing resolution")
@@ -413,7 +386,7 @@ async fn main() {
         for chunk in rows.chunks(10) {
             let items: Vec<_> = chunk.iter().map(|chunk| chunk.1).collect();
             let hashes = loop {
-                match get_hashes(api_key, &items).await {
+                match get_hashes(&opts.api_key, &items).await {
                     Ok(hashes) => break hashes,
                     Err(err) => {
                         warn!("Got API error, retrying in 30 seconds: {}", err);
@@ -453,68 +426,91 @@ async fn main() {
 
     pb.finish_with_message("Completed hash lookup");
 
-    let mut stmt = conn
-        .prepare("SELECT data FROM hashes")
-        .expect("Unable to select hash data");
-
-    let sources_data = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .expect("Unable to find items needing lookup");
-
-    let sources = sources_data.into_iter().map(|item| {
-        let s = item.expect("Row was bad");
-        let data: Vec<File> = serde_json::from_str(&s).expect("Database contained malformed data");
-
-        data.into_iter()
-            .map(|item| {
-                let site_info = item.site_info.expect("Missing site info in database");
-
-                match site_info {
-                    SiteInfo::FurAffinity(_) => {
-                        format!("https://www.furaffinity.net/view/{}/", item.site_id)
-                    }
-                    SiteInfo::E621(_) => format!("https://e621.net/post/show/{}", item.site_id),
-                    SiteInfo::Twitter => format!(
-                        "https://twitter.com/{}/status/{}",
-                        item.artists.unwrap().get(0).unwrap(),
-                        item.site_id
-                    ),
-                    SiteInfo::Weasyl => {
-                        format!("https://www.weasyl.com/view/{}/", item.site_id)
-                    }
-                }
-            })
-            .collect::<Vec<String>>()
-    });
-
-    let mut sources: Vec<String> = sources.into_iter().flatten().collect();
-    sources.sort();
-    sources.dedup();
-
-    let mut f = tokio::fs::File::create(output)
+    let mut f = tokio::fs::File::create(opts.output)
         .await
         .expect("Unable to create output file");
-    for source in sources {
-        f.write_all(format!("{}\n", source).as_bytes())
-            .await
-            .expect("Unable to write source");
+
+    match opts.action {
+        Action::AllSources => {
+            let mut stmt = conn
+                .prepare("SELECT data FROM hashes")
+                .expect("Unable to select hash data");
+
+            let sources_data = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("Unable to find items needing lookup");
+
+            let sources = sources_data.into_iter().map(|item| {
+                let s = item.expect("Row was bad");
+                let data: Vec<File> =
+                    serde_json::from_str(&s).expect("Database contained malformed data");
+
+                data.into_iter().map(url_for_file).collect::<Vec<String>>()
+            });
+
+            let mut sources: Vec<String> = sources.into_iter().flatten().collect();
+            sources.sort();
+            sources.dedup();
+
+            for source in sources {
+                f.write_all(format!("{}\n", source).as_bytes())
+                    .await
+                    .expect("Unable to write source");
+            }
+        }
+        Action::PerFile => {
+            let mut stmt = conn
+                .prepare("SELECT cache.path, hashes.data FROM cache JOIN hashes ON hashes.id = cache.hash_lookup_id WHERE cache.path = ?1")
+                .expect("Unable to prepare cache lookup query");
+
+            let mut csv = csv_async::AsyncWriter::from_writer(f);
+
+            for entry in walkdir::WalkDir::new(opts.directory)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+            {
+                let path = entry.path().to_string_lossy();
+
+                let items = stmt
+                    .query_map([&path], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .expect("Unable to query")
+                    .filter_map(|data| data.ok())
+                    .filter_map(|(path, data)| {
+                        serde_json::from_str::<Vec<File>>(&data)
+                            .map(|data| (path, data))
+                            .ok()
+                    });
+
+                for (path, data) in items {
+                    let data: Vec<String> = data.into_iter().map(url_for_file).collect();
+
+                    csv.write_record(&[path, data.join(" ")])
+                        .await
+                        .expect("could not write csv record");
+                }
+            }
+        }
     }
 
-    if let Some(move_matched) = move_matched {
-        info!("Moving matched items to {}", move_matched.display());
+    if let Some(move_matched) = opts.move_matched {
+        let path = Path::new(&move_matched);
+        info!("Moving matched items to {}", path.display());
         remove_items(
             &conn,
             "SELECT id, path FROM cache WHERE looked_up = 1 AND hash_lookup_id IS NOT NULL",
-            move_matched,
+            path,
         );
     }
 
-    if let Some(move_unmatched) = move_unmatched {
-        info!("Moving unmatched items to {}", move_unmatched.display());
+    if let Some(move_unmatched) = opts.move_unmatched {
+        let path = Path::new(&move_unmatched);
+        info!("Moving unmatched items to {}", path.display());
         remove_items(
             &conn,
             "SELECT id, path FROM cache WHERE looked_up = 1 AND hash_lookup_id IS NULL",
-            move_unmatched,
+            path,
         );
     }
 
@@ -540,5 +536,26 @@ fn remove_items(conn: &rusqlite::Connection, query: &str, move_to: &std::path::P
         remove
             .execute(rusqlite::params![id])
             .expect("Unable to remove item from cache");
+    }
+}
+
+fn url_for_file(item: File) -> String {
+    let site_info = item.site_info.expect("Missing site info in database");
+
+    match site_info {
+        SiteInfo::FurAffinity(_) => {
+            format!("https://www.furaffinity.net/view/{}/", item.site_id)
+        }
+        SiteInfo::E621(_) => {
+            format!("https://e621.net/post/show/{}", item.site_id)
+        }
+        SiteInfo::Twitter => format!(
+            "https://twitter.com/{}/status/{}",
+            item.artists.unwrap().get(0).unwrap(),
+            item.site_id
+        ),
+        SiteInfo::Weasyl => {
+            format!("https://www.weasyl.com/view/{}/", item.site_id)
+        }
     }
 }
