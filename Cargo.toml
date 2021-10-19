@@ -11,20 +11,15 @@ license = "MIT"
 [dependencies]
 clap = "2"
 pretty_env_logger = "0.4"
-tokio = { version = "0.2", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 img_hash = "3"
 image = "0.23"
 log = "0.4"
 walkdir = "2"
 futures = "0.3"
-reqwest = { version = "0.10", features = ["json"] }
+reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.24", features = ["bundled", "serde_json"] }
-directories = "3"
-indicatif = "0.15"
-
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
+rusqlite = { version = "0.26", features = ["bundled", "serde_json"] }
+directories = "4"
+indicatif = "0.16"

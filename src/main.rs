@@ -1,15 +1,13 @@
+use std::collections::HashMap;
+
 use clap::{value_t, App, Arg};
 use futures::stream::StreamExt;
 use log::{debug, error, info, trace, warn};
-use std::collections::HashMap;
-use tokio::prelude::*;
-
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct File {
-    pub id: i32,
-
     pub site_id: i64,
     pub site_id_str: String,
 
@@ -37,6 +35,7 @@ pub enum SiteInfo {
     #[serde(rename = "e621")]
     E621(E621File),
     Twitter,
+    Weasyl,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,7 +100,7 @@ async fn hash_image(id: i32, path: String) -> Option<ImageInfo> {
         let bytes = hash.as_bytes();
 
         let mut b: [u8; 8] = [0; 8];
-        b.copy_from_slice(&bytes);
+        b.copy_from_slice(bytes);
 
         debug!("Hashed {}", p.to_str().unwrap());
 
@@ -322,7 +321,7 @@ async fn main() {
         .prepare("SELECT id, path FROM cache WHERE hash IS NULL")
         .expect("Unable to prepare cache lookup query");
     let needed_hashes: Vec<(i32, String)> = stmt
-        .query_map(rusqlite::NO_PARAMS, |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .expect("Unable to find items needing lookup")
         .filter_map(|row| row.ok())
         .collect();
@@ -357,7 +356,7 @@ async fn main() {
     })
     .await;
 
-    pb.finish_with_message(&format!(
+    pb.finish_with_message(format!(
         "Hashed {} items in {} seconds",
         len,
         start.elapsed().as_secs()
@@ -367,7 +366,7 @@ async fn main() {
         .prepare("SELECT COUNT(*) FROM cache WHERE looked_up = FALSE")
         .expect("Unable to prepare count query");
     let count: i32 = stmt
-        .query_row(rusqlite::NO_PARAMS, |row| row.get(0))
+        .query_row([], |row| row.get(0))
         .expect("Unable to get count");
 
     let mut stmt = conn
@@ -386,9 +385,10 @@ async fn main() {
     let pb = indicatif::ProgressBar::new(count as u64);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] ({eta})")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
             .progress_chars("#>-"),
     );
+    pb.enable_steady_tick(100);
 
     loop {
         let rows: Vec<(i32, i64)> = stmt
@@ -415,9 +415,9 @@ async fn main() {
             let hashes = loop {
                 match get_hashes(api_key, &items).await {
                     Ok(hashes) => break hashes,
-                    Err(_err) => {
-                        warn!("Got API error, retrying in 30 seconds");
-                        tokio::time::delay_for(std::time::Duration::from_secs(30)).await;
+                    Err(err) => {
+                        warn!("Got API error, retrying in 30 seconds: {}", err);
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     }
                 }
             };
@@ -447,7 +447,7 @@ async fn main() {
 
         let delay: i32 = 61 - (start.elapsed().as_secs() as i32);
         if delay > 0 {
-            tokio::time::delay_for(std::time::Duration::from_secs(delay as u64)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(delay as u64)).await;
         }
     }
 
@@ -457,37 +457,35 @@ async fn main() {
         .prepare("SELECT data FROM hashes")
         .expect("Unable to select hash data");
 
-    let sources_data: Vec<rusqlite::Result<String>> = stmt
-        .query_map(rusqlite::NO_PARAMS, |row| row.get(0))
-        .expect("Unable to find items needing lookup")
-        .collect();
+    let sources_data = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("Unable to find items needing lookup");
 
-    let sources: Vec<Vec<String>> = sources_data
-        .into_iter()
-        .map(|item| {
-            let s = item.expect("Row was bad");
-            let data: Vec<File> =
-                serde_json::from_str(&s).expect("Database contained malformed data");
+    let sources = sources_data.into_iter().map(|item| {
+        let s = item.expect("Row was bad");
+        let data: Vec<File> = serde_json::from_str(&s).expect("Database contained malformed data");
 
-            data.into_iter()
-                .map(|item| {
-                    let site_info = item.site_info.expect("Missing site info in database");
+        data.into_iter()
+            .map(|item| {
+                let site_info = item.site_info.expect("Missing site info in database");
 
-                    match site_info {
-                        SiteInfo::FurAffinity(_) => {
-                            format!("https://www.furaffinity.net/view/{}/", item.site_id)
-                        }
-                        SiteInfo::E621(_) => format!("https://e621.net/post/show/{}", item.site_id),
-                        SiteInfo::Twitter => format!(
-                            "https://twitter.com/{}/status/{}",
-                            item.artists.unwrap().get(0).unwrap(),
-                            item.site_id
-                        ),
+                match site_info {
+                    SiteInfo::FurAffinity(_) => {
+                        format!("https://www.furaffinity.net/view/{}/", item.site_id)
                     }
-                })
-                .collect()
-        })
-        .collect();
+                    SiteInfo::E621(_) => format!("https://e621.net/post/show/{}", item.site_id),
+                    SiteInfo::Twitter => format!(
+                        "https://twitter.com/{}/status/{}",
+                        item.artists.unwrap().get(0).unwrap(),
+                        item.site_id
+                    ),
+                    SiteInfo::Weasyl => {
+                        format!("https://www.weasyl.com/view/{}/", item.site_id)
+                    }
+                }
+            })
+            .collect::<Vec<String>>()
+    });
 
     let mut sources: Vec<String> = sources.into_iter().flatten().collect();
     sources.sort();
@@ -529,7 +527,7 @@ fn remove_items(conn: &rusqlite::Connection, query: &str, move_to: &std::path::P
         .prepare("DELETE FROM cache WHERE id = ?")
         .expect("Unable to prepare delete");
     let rows: Vec<rusqlite::Result<(i32, String)>> = stmt
-        .query_map(rusqlite::NO_PARAMS, |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .expect("Unable to query")
         .collect();
 
