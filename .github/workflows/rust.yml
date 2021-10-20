@@ -1,9 +1,6 @@
 name: Rust
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
+on: [push]
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,6 +19,11 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - run: rustup component add clippy
+    - uses: actions-rs/clippy-check@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Build
       run: cargo build --verbose
