@@ -27,3 +27,4 @@ csv-async = { version = "1", features = ["tokio", "with_serde"] }
 hamming = "0.1"
 bk-tree = "0.4"
 base64 = "0.13"
+anyhow = "1"

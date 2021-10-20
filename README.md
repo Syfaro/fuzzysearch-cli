@@ -16,6 +16,9 @@ each image and space separated links to each known source.
 
 More information about the tool's use can be found with the `--help` flag.
 
+It is also possible to use a FuzzySearch database dump to perform all searches
+locally. Use the `--database-path` option instead of `--api-key`.
+
 ## Details
 
 It caches details about each path's hash and each hash's matches indefinitely.
