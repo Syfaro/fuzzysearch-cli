@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::{collections::HashMap, convert::TryInto};
@@ -27,10 +28,10 @@ struct Opts {
     #[clap(short, long, default_value = "60")]
     limit: usize,
     /// Move matched items to directory
-    #[clap(long)]
+    #[clap(long, requires = "api-key")]
     move_matched: Option<String>,
     /// Move matched items to directory
-    #[clap(long)]
+    #[clap(long, requires = "api-key")]
     move_unmatched: Option<String>,
     /// Path to folder containing images
     directory: String,
@@ -99,7 +100,7 @@ fn main() {
     } else if let Some(api_key) = opts.api_key {
         info!("Performing lookups");
 
-        fuzzysearch::prepare_index(&pool, &api_key, opts.limit, lookup_count)
+        fuzzysearch::prepare_index(&conn, &api_key, opts.limit, lookup_count)
             .expect("Could not perform lookup");
 
         None
@@ -137,9 +138,9 @@ fn main() {
     for (path, hash) in files {
         let entry = sources.entry(path).or_default();
 
-        let matches: Vec<String> = if let Some(tree) = &tree {
-            let mut matches = Vec::new();
+        let mut matches = Vec::new();
 
+        if let Some(tree) = &tree {
             for (_distance, matching_hash) in tree.find(&hash.into(), 3).into_iter() {
                 tree_stmt
                     .query_map([i64::from(*matching_hash)], |row| {
@@ -153,11 +154,7 @@ fn main() {
                         matches.push(database::url_for(site, site_id));
                     });
             }
-
-            matches
         } else {
-            let mut matches = Vec::new();
-
             for data in stmt
                 .query_map([hash], |row| row.get::<_, String>(0))
                 .unwrap()
@@ -167,16 +164,14 @@ fn main() {
                     serde_json::from_str::<Vec<fuzzysearch::File>>(&data).unwrap_or_default();
                 matches.extend(files.into_iter().map(fuzzysearch::url_for_file));
             }
-
-            matches
-        };
+        }
 
         *entry = matches;
     }
 
     info!("Sources calculated, writing output");
 
-    let mut f = std::fs::File::create(opts.output).expect("Unable to create output file");
+    let mut f = File::create(opts.output).expect("Unable to create output file");
 
     match opts.action {
         Action::AllSources => {

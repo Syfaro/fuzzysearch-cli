@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -104,13 +102,11 @@ pub fn url_for_file(item: File) -> String {
 
 /// Prepare the index by looking up each hash.
 pub fn prepare_index(
-    pool: &Pool<SqliteConnectionManager>,
+    conn: &rusqlite::Connection,
     api_key: &str,
     rate_limit: usize,
     lookup_count: usize,
 ) -> anyhow::Result<()> {
-    let conn = pool.get()?;
-
     let mut stmt = conn
         .prepare("SELECT id, hash FROM cache WHERE looked_up = FALSE LIMIT ?1")
         .expect("Unable to prepare query to lookup items needing resolution");
