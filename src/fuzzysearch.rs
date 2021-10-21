@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -46,27 +48,25 @@ pub struct E621File {
 
 /// Search for multiple hashes at once, returning a hashmap of each searched
 /// hash and the corresponding matches.
-pub async fn get_hashes(api_key: &str, hashes: &[i64]) -> reqwest::Result<HashMap<i64, Vec<File>>> {
-    let mut params = HashMap::new();
-    params.insert(
-        "hashes",
-        hashes
-            .iter()
-            .map(|hash| hash.to_string())
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    params.insert("distance", 3.to_string());
-
-    let client = reqwest::Client::new();
-    let resp = client
+pub fn get_hashes(
+    agent: &ureq::Agent,
+    api_key: &str,
+    hashes: &[i64],
+) -> anyhow::Result<HashMap<i64, Vec<File>>> {
+    let resp: Vec<File> = agent
         .get("https://api.fuzzysearch.net/hashes")
-        .header("X-Api-Key", api_key.as_bytes())
-        .query(&params)
-        .send()
-        .await?;
-
-    let resp: Vec<File> = resp.json().await?;
+        .set("X-Api-Key", api_key)
+        .query(
+            "hashes",
+            &hashes
+                .iter()
+                .map(|hash| hash.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+        .query("distance", "3")
+        .call()?
+        .into_json()?;
 
     let mut items: HashMap<i64, Vec<File>> = HashMap::new();
 
@@ -103,12 +103,14 @@ pub fn url_for_file(item: File) -> String {
 }
 
 /// Prepare the index by looking up each hash.
-pub async fn prepare_index(
-    conn: &rusqlite::Connection,
+pub fn prepare_index(
+    pool: &Pool<SqliteConnectionManager>,
     api_key: &str,
     rate_limit: usize,
     lookup_count: usize,
 ) -> anyhow::Result<()> {
+    let conn = pool.get()?;
+
     let mut stmt = conn
         .prepare("SELECT id, hash FROM cache WHERE looked_up = FALSE LIMIT ?1")
         .expect("Unable to prepare query to lookup items needing resolution");
@@ -129,6 +131,8 @@ pub async fn prepare_index(
             .progress_chars("#>-")
     );
     pb.enable_steady_tick(100);
+
+    let agent = ureq::agent();
 
     loop {
         let rows: Vec<(i32, i64)> = stmt
@@ -152,11 +156,11 @@ pub async fn prepare_index(
             let items: Vec<_> = chunk.iter().map(|chunk| chunk.1).collect();
 
             let hashes = loop {
-                match get_hashes(api_key, &items).await {
+                match get_hashes(&agent, api_key, &items) {
                     Ok(hashes) => break hashes,
                     Err(_err) => {
                         pb.set_message("Got API error, retrying in 30 seconds");
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        std::thread::sleep(std::time::Duration::from_secs(30));
                         pb.set_message("");
                     }
                 }
@@ -187,7 +191,7 @@ pub async fn prepare_index(
 
         let delay = 61 - start.elapsed().as_secs();
         if delay > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            std::thread::sleep(std::time::Duration::from_secs(delay));
         }
     }
 

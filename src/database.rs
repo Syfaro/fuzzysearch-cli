@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use futures::StreamExt;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
 
 /// A node in the BK tree.
@@ -93,8 +94,8 @@ pub fn url_for(site: Site, site_id: i64) -> String {
 ///
 /// This imports all items from the dump into the SQLite database and creates
 /// a BK tree from all unique hashes.
-pub async fn prepare_index(
-    conn: &mut rusqlite::Connection,
+pub fn prepare_index(
+    pool: &Pool<SqliteConnectionManager>,
     database_path: &str,
     only_cached: bool,
 ) -> anyhow::Result<bk_tree::BKTree<Node, Hamming>> {
@@ -105,6 +106,8 @@ pub async fn prepare_index(
     );
 
     let mut tree = bk_tree::BKTree::new(Hamming);
+
+    let mut conn = pool.get()?;
 
     if only_cached {
         let mut stmt = conn.prepare("SELECT hash FROM local_hashes")?;
@@ -123,16 +126,18 @@ pub async fn prepare_index(
 
     let path = Path::new(&database_path);
 
-    let file = tokio::fs::File::open(path).await?;
-    let mut reader = csv_async::AsyncDeserializer::from_reader(file);
-    let mut records = reader.deserialize::<Item>();
+    let file = std::fs::File::open(path)?;
+    let mut reader = csv::Reader::from_reader(file);
+    let records = reader.deserialize::<Item>();
 
     let tx = conn.transaction()?;
     let mut stmt =
         tx.prepare("INSERT OR IGNORE INTO local_hashes (hash, site, site_id) VALUES (?1, ?2, ?3)")?;
 
-    while let Some(Ok(row)) = records.next().await {
+    for row in records {
         pb.inc(1);
+
+        let row = row?;
 
         if let Some(hash) = row.hash {
             stmt.execute(rusqlite::params![
