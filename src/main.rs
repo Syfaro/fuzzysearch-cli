@@ -1,10 +1,13 @@
+use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 use std::{collections::HashMap, convert::TryInto};
 
 use clap::Parser;
-use futures::stream::StreamExt;
 use log::{debug, error, info, trace, warn};
-use tokio::io::AsyncWriteExt;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rayon::iter::{ParallelBridge, ParallelIterator};
 
 mod database;
 mod fuzzysearch;
@@ -12,9 +15,6 @@ mod fuzzysearch;
 #[derive(Parser)]
 #[clap(name = env!("CARGO_PKG_NAME"), version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = env!("CARGO_PKG_DESCRIPTION"))]
 struct Opts {
-    /// Maximun number of images to hash at once
-    #[clap(short, long, default_value = "8")]
-    concurrency: usize,
     /// FuzzySearch API key
     #[clap(long, required_unless_present = "database-path")]
     api_key: Option<String>,
@@ -28,10 +28,10 @@ struct Opts {
     #[clap(short, long, default_value = "60")]
     limit: usize,
     /// Move matched items to directory
-    #[clap(long)]
+    #[clap(long, requires = "api-key")]
     move_matched: Option<String>,
     /// Move matched items to directory
-    #[clap(long)]
+    #[clap(long, requires = "api-key")]
     move_unmatched: Option<String>,
     /// Path to folder containing images
     directory: String,
@@ -49,8 +49,7 @@ enum Action {
     PerFile,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "warn,fuzzysearch_cli=info");
     }
@@ -74,7 +73,8 @@ async fn main() {
     }
 
     info!("Creating working database");
-    let mut conn = initialize_database().expect("Could not create database");
+    let pool = initialize_database().expect("Could not create database");
+    let conn = pool.get().unwrap();
 
     info!("Collecting information about files to scan");
 
@@ -86,17 +86,14 @@ async fn main() {
 
     info!("Found {} files needing hashing", needed_hashes.len());
 
-    hash_images(&conn, opts.concurrency, needed_hashes)
-        .await
-        .expect("Could not hash images");
+    hash_images(&pool, needed_hashes).expect("Could not hash images");
 
     let lookup_count = images_needing_lookup(&conn).expect("Could not count items needing lookup");
 
     let tree = if let Some(database_path) = opts.database_path.as_ref() {
         info!("Creating index");
 
-        let tree = database::prepare_index(&mut conn, database_path, opts.cached_database)
-            .await
+        let tree = database::prepare_index(&pool, database_path, opts.cached_database)
             .expect("Could not create database index");
 
         Some(tree)
@@ -104,7 +101,6 @@ async fn main() {
         info!("Performing lookups");
 
         fuzzysearch::prepare_index(&conn, &api_key, opts.limit, lookup_count)
-            .await
             .expect("Could not perform lookup");
 
         None
@@ -142,9 +138,9 @@ async fn main() {
     for (path, hash) in files {
         let entry = sources.entry(path).or_default();
 
-        let matches: Vec<String> = if let Some(tree) = &tree {
-            let mut matches = Vec::new();
+        let mut matches = Vec::new();
 
+        if let Some(tree) = &tree {
             for (_distance, matching_hash) in tree.find(&hash.into(), 3).into_iter() {
                 tree_stmt
                     .query_map([i64::from(*matching_hash)], |row| {
@@ -158,11 +154,7 @@ async fn main() {
                         matches.push(database::url_for(site, site_id));
                     });
             }
-
-            matches
         } else {
-            let mut matches = Vec::new();
-
             for data in stmt
                 .query_map([hash], |row| row.get::<_, String>(0))
                 .unwrap()
@@ -172,18 +164,14 @@ async fn main() {
                     serde_json::from_str::<Vec<fuzzysearch::File>>(&data).unwrap_or_default();
                 matches.extend(files.into_iter().map(fuzzysearch::url_for_file));
             }
-
-            matches
-        };
+        }
 
         *entry = matches;
     }
 
     info!("Sources calculated, writing output");
 
-    let mut f = tokio::fs::File::create(opts.output)
-        .await
-        .expect("Unable to create output file");
+    let mut f = File::create(opts.output).expect("Unable to create output file");
 
     match opts.action {
         Action::AllSources => {
@@ -197,16 +185,14 @@ async fn main() {
 
             for source in sources {
                 f.write_all(format!("{}\n", source).as_bytes())
-                    .await
                     .expect("Unable to write source");
             }
         }
         Action::PerFile => {
-            let mut csv = csv_async::AsyncWriter::from_writer(f);
+            let mut csv = csv::Writer::from_writer(f);
 
             for (path, sources) in sources {
                 csv.write_record(&[path, sources.join(" ")])
-                    .await
                     .expect("could not write csv record");
             }
         }
@@ -249,39 +235,31 @@ struct ImageInfo {
 /// Attempt to hash an image.
 ///
 /// Work is performed on tokio's blocking threads.
-async fn hash_image(id: i32, path: String) -> Option<ImageInfo> {
+fn hash_image(id: i32, path: String) -> Option<ImageInfo> {
     trace!("Opening image: {}", path);
 
-    tokio::task::spawn_blocking(move || {
-        let path = Path::new(&path);
+    let path = Path::new(&path);
 
-        let image = match image::open(&path) {
-            Ok(image) => image,
-            Err(e) => {
-                warn!("Unable to decode image: {}: {}", path.display(), e);
-                return None;
-            }
-        };
+    let image = image::open(path).ok()?;
 
-        let hasher = img_hash::HasherConfig::with_bytes_type::<[u8; 8]>()
-            .hash_alg(img_hash::HashAlg::Gradient)
-            .hash_size(8, 8)
-            .preproc_dct()
-            .to_hasher();
+    let hasher = img_hash::HasherConfig::with_bytes_type::<[u8; 8]>()
+        .hash_alg(img_hash::HashAlg::Gradient)
+        .hash_size(8, 8)
+        .preproc_dct()
+        .to_hasher();
 
-        let hash = hasher.hash_image(&image);
-        let bytes = hash.as_bytes();
+    let hash = hasher.hash_image(&image);
+    let bytes = hash.as_bytes();
 
-        let hash: [u8; 8] = bytes.try_into().unwrap();
+    let hash: [u8; 8] = bytes.try_into().ok()?;
 
-        debug!("Hashed {}", path.display());
+    debug!("Hashed {}", path.display());
 
-        Some((hash, path.to_path_buf()))
+    Some(ImageInfo {
+        id,
+        hash,
+        path: path.to_path_buf(),
     })
-    .await
-    .ok()
-    .flatten()
-    .map(|(hash, path)| ImageInfo { id, hash, path })
 }
 
 /// Move items from a query to a new path and remove from cache.
@@ -319,13 +297,16 @@ fn verify_directory(dir: &Option<String>) -> bool {
 }
 
 /// Create storage directory and database.
-fn initialize_database() -> anyhow::Result<rusqlite::Connection> {
+fn initialize_database() -> anyhow::Result<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>> {
     let project_dir = directories::ProjectDirs::from("net", "fuzzysearch", "fuzzysearch-cli")
         .expect("System did not provide appropriate directories");
     let data_dir = project_dir.data_dir();
     std::fs::create_dir_all(&data_dir)?;
 
-    let conn = rusqlite::Connection::open(data_dir.join("hashes.db"))?;
+    let manager = SqliteConnectionManager::file(data_dir.join("hashes.db"));
+    let pool = r2d2::Pool::new(manager)?;
+
+    let conn = pool.get()?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS hashes (
@@ -361,7 +342,7 @@ fn initialize_database() -> anyhow::Result<rusqlite::Connection> {
         [],
     )?;
 
-    Ok(conn)
+    Ok(pool)
 }
 
 /// Collect all local images and paths and store in database.
@@ -422,9 +403,8 @@ fn get_unhashed_images(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(i32, 
 }
 
 /// Hash many images at once, saving the result to the database.
-async fn hash_images(
-    conn: &rusqlite::Connection,
-    concurrency: usize,
+fn hash_images(
+    pool: &Pool<SqliteConnectionManager>,
     images: Vec<(i32, String)>,
 ) -> anyhow::Result<()> {
     let pb = indicatif::ProgressBar::new(images.len() as u64);
@@ -434,19 +414,21 @@ async fn hash_images(
             .progress_chars("#>-"),
     );
 
-    futures::stream::iter(images.into_iter().map(|file| hash_image(file.0, file.1)))
-        .buffer_unordered(concurrency)
-        .filter_map(futures::future::ready)
+    images
+        .into_iter()
+        .par_bridge()
+        .filter_map(|file| hash_image(file.0, file.1))
         .for_each(|hash| {
+            let conn = pool.get().unwrap();
+
             conn.execute(
                 "UPDATE cache SET hash = ?1 WHERE id = ?2",
                 rusqlite::params![i64::from_be_bytes(hash.hash), hash.id],
             )
             .expect("Unable to insert item into hash cache");
+
             pb.inc(1);
-            futures::future::ready(())
-        })
-        .await;
+        });
 
     pb.finish_at_current_pos();
 
