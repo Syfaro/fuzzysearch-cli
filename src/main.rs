@@ -3,7 +3,9 @@ use std::io::Write;
 use std::path::Path;
 use std::{collections::HashMap, convert::TryInto};
 
-use clap::Parser;
+use clap::{ArgEnum, Parser, Subcommand};
+use directories::ProjectDirs;
+use flate2::read::GzDecoder;
 use log::{debug, error, info, trace, warn};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -13,25 +15,44 @@ mod database;
 mod fuzzysearch;
 
 #[derive(Parser)]
-#[clap(name = env!("CARGO_PKG_NAME"), version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = env!("CARGO_PKG_DESCRIPTION"))]
+#[clap(author, version, about)]
 struct Opts {
+    #[clap(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    DownloadDatabase { path: String },
+    MatchImages(MatchImagesOpts),
+}
+
+#[derive(Parser)]
+struct MatchImagesOpts {
     /// FuzzySearch API key
-    #[clap(long, required_unless_present = "database-path")]
+    #[clap(
+        long,
+        required_unless_present_any = &["database-path", "cached-database"],
+        env = "FUZZYSEARCH_API_KEY"
+    )]
     api_key: Option<String>,
     /// FuzzySearch database dump path
-    #[clap(long)]
+    #[clap(
+        long,
+        required_unless_present_any = &["api-key", "cached-database"],
+    )]
     database_path: Option<String>,
     /// Only use cached database values instead of re-reading dump
-    #[clap(long, requires = "database-path")]
+    #[clap(short, long)]
     cached_database: bool,
     /// API limit per minute
     #[clap(short, long, default_value = "60")]
     limit: usize,
     /// Move matched items to directory
-    #[clap(long, requires = "api-key")]
+    #[clap(long)]
     move_matched: Option<String>,
     /// Move matched items to directory
-    #[clap(long, requires = "api-key")]
+    #[clap(long)]
     move_unmatched: Option<String>,
     /// Path to folder containing images
     directory: String,
@@ -43,7 +64,7 @@ struct Opts {
     output: String,
 }
 
-#[derive(Debug, clap::ArgEnum, Clone)]
+#[derive(Clone, Debug, ArgEnum)]
 enum Action {
     AllSources,
     PerFile,
@@ -58,6 +79,35 @@ fn main() {
 
     let opts = Opts::parse();
 
+    match opts.command {
+        Command::DownloadDatabase { path } => download_database(path),
+        Command::MatchImages(opts) => match_images(opts),
+    }
+}
+
+fn download_database(path: String) {
+    log::info!("Starting to download database");
+
+    let url = ureq::get("https://api-next.fuzzysearch.net/dump/latest")
+        .call()
+        .expect("Could not discover URL for latest database dump")
+        .into_string()
+        .expect("FuzzySearch returned bad data");
+
+    let mut file = File::create(path).expect("Could not create database file");
+
+    let resp = ureq::get(&url)
+        .call()
+        .expect("Could not start database download");
+    let reader = resp.into_reader();
+    let mut decompressor = GzDecoder::new(reader);
+
+    let len = std::io::copy(&mut decompressor, &mut file).expect("Could not save database file");
+
+    log::info!("Download complete! Database was {} bytes.", len);
+}
+
+fn match_images(opts: MatchImagesOpts) {
     if !verify_directory(&opts.move_matched) {
         error!("Move matched directory does not exist");
         std::process::exit(1);
@@ -90,10 +140,17 @@ fn main() {
 
     let lookup_count = images_needing_lookup(&conn).expect("Could not count items needing lookup");
 
-    let tree = if let Some(database_path) = opts.database_path.as_ref() {
-        info!("Creating index");
+    let tree = if opts.cached_database {
+        info!("Loading index from cache");
 
-        let tree = database::prepare_index(&pool, database_path, opts.cached_database)
+        let tree = database::prepare_index(&pool, None, opts.cached_database)
+            .expect("Could not create database index");
+
+        Some(tree)
+    } else if let Some(database_path) = opts.database_path.as_ref() {
+        info!("Loading index");
+
+        let tree = database::prepare_index(&pool, Some(database_path), opts.cached_database)
             .expect("Could not create database index");
 
         Some(tree)
@@ -141,7 +198,7 @@ fn main() {
         let mut matches = Vec::new();
 
         if let Some(tree) = &tree {
-            for (_distance, matching_hash) in tree.find(&hash.into(), 3).into_iter() {
+            for (_distance, matching_hash) in tree.find(&hash.into(), 3) {
                 tree_stmt
                     .query_map([i64::from(*matching_hash)], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -177,8 +234,7 @@ fn main() {
         Action::AllSources => {
             let mut sources: Vec<String> = sources
                 .into_iter()
-                .map(|(_path, sources)| sources)
-                .flatten()
+                .flat_map(|(_path, sources)| sources)
                 .collect();
             sources.sort();
             sources.dedup();
@@ -228,8 +284,6 @@ struct ImageInfo {
     id: i32,
     /// The hash of the image.
     hash: [u8; 8],
-    /// The image file's path.
-    path: std::path::PathBuf,
 }
 
 /// Attempt to hash an image.
@@ -255,11 +309,7 @@ fn hash_image(id: i32, path: String) -> Option<ImageInfo> {
 
     debug!("Hashed {}", path.display());
 
-    Some(ImageInfo {
-        id,
-        hash,
-        path: path.to_path_buf(),
-    })
+    Some(ImageInfo { id, hash })
 }
 
 /// Move items from a query to a new path and remove from cache.
@@ -296,10 +346,14 @@ fn verify_directory(dir: &Option<String>) -> bool {
     path.exists()
 }
 
+fn get_project_dirs() -> ProjectDirs {
+    directories::ProjectDirs::from("net", "fuzzysearch", "fuzzysearch-cli")
+        .expect("System did not provide appropriate directories")
+}
+
 /// Create storage directory and database.
 fn initialize_database() -> anyhow::Result<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>> {
-    let project_dir = directories::ProjectDirs::from("net", "fuzzysearch", "fuzzysearch-cli")
-        .expect("System did not provide appropriate directories");
+    let project_dir = get_project_dirs();
     let data_dir = project_dir.data_dir();
     std::fs::create_dir_all(&data_dir)?;
 
@@ -410,7 +464,7 @@ fn hash_images(
     let pb = indicatif::ProgressBar::new(images.len() as u64);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}").unwrap()
             .progress_chars("#>-"),
     );
 
@@ -430,7 +484,7 @@ fn hash_images(
             pb.inc(1);
         });
 
-    pb.finish_at_current_pos();
+    pb.abandon();
 
     Ok(())
 }

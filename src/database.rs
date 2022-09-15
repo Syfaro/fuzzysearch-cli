@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    io::{BufRead, BufReader},
+    path::Path,
+};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -96,13 +99,17 @@ pub fn url_for(site: Site, site_id: i64) -> String {
 /// a BK tree from all unique hashes.
 pub fn prepare_index(
     pool: &Pool<SqliteConnectionManager>,
-    database_path: &str,
+    database_path: Option<&str>,
     only_cached: bool,
 ) -> anyhow::Result<bk_tree::BKTree<Node, Hamming>> {
-    let pb = indicatif::ProgressBar::new_spinner();
+    let pb = indicatif::ProgressBar::new(0);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {pos} completed, {per_sec}"),
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
     );
 
     let mut tree = bk_tree::BKTree::new(Hamming);
@@ -110,6 +117,10 @@ pub fn prepare_index(
     let mut conn = pool.get()?;
 
     if only_cached {
+        let mut stmt = conn.prepare("SELECT count(*) FROM local_hashes")?;
+        let count = stmt.query_row([], |row| row.get::<_, u64>(0))?;
+        pb.set_length(count);
+
         let mut stmt = conn.prepare("SELECT hash FROM local_hashes")?;
         for hash in stmt.query_map([], |row| row.get::<_, i64>(0))? {
             pb.inc(1);
@@ -120,11 +131,17 @@ pub fn prepare_index(
             }
         }
 
-        pb.finish_at_current_pos();
+        pb.abandon();
         return Ok(tree);
     }
 
+    let database_path =
+        database_path.expect("Not using cached values, database path must be specified");
+
     let path = Path::new(&database_path);
+
+    let lines = BufReader::new(std::fs::File::open(path)?).lines().count() - 1;
+    pb.set_length(lines as u64);
 
     let file = std::fs::File::open(path)?;
     let mut reader = csv::Reader::from_reader(file);
@@ -155,7 +172,7 @@ pub fn prepare_index(
 
     drop(stmt);
     tx.commit().unwrap();
-    pb.finish_at_current_pos();
+    pb.abandon();
 
     Ok(tree)
 }

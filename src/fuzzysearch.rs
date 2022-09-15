@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -123,10 +123,10 @@ pub fn prepare_index(
         indicatif::ProgressStyle::default_bar()
             .template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}): {msg}"
-            )
+            ).unwrap()
             .progress_chars("#>-")
     );
-    pb.enable_steady_tick(100);
+    pb.enable_steady_tick(Duration::from_millis(100));
 
     let agent = ureq::agent();
 
@@ -191,7 +191,7 @@ pub fn prepare_index(
         }
     }
 
-    pb.finish_at_current_pos();
+    pb.abandon();
 
     Ok(())
 }
