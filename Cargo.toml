@@ -1,6 +1,6 @@
 [package]
 name = "fuzzysearch-cli"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Syfaro <syfaro@huefox.com>"]
 edition = "2021"
 description = "Match a large number of images against the FuzzySearch API"
