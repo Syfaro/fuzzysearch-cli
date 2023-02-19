@@ -52,7 +52,7 @@ pub fn get_hashes(
     hashes: &[i64],
 ) -> anyhow::Result<HashMap<i64, Vec<File>>> {
     let resp: Vec<File> = agent
-        .get("https://api.fuzzysearch.net/hashes")
+        .get("https://api-next.fuzzysearch.net/hashes")
         .set("X-Api-Key", api_key)
         .query(
             "hashes",
@@ -154,8 +154,8 @@ pub fn prepare_index(
             let hashes = loop {
                 match get_hashes(&agent, api_key, &items) {
                     Ok(hashes) => break hashes,
-                    Err(_err) => {
-                        pb.set_message("Got API error, retrying in 30 seconds");
+                    Err(err) => {
+                        pb.set_message(format!("Got API error, retrying in 30 seconds: {err}"));
                         std::thread::sleep(std::time::Duration::from_secs(30));
                         pb.set_message("");
                     }

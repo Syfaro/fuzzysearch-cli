@@ -15,9 +15,9 @@ sign-tag = true
 
 [dependencies]
 anyhow = "1.0.65"
-base64 = "0.13.0"
+base64 = "0.21.0"
 bk-tree = "0.4.0"
-clap = { version = "3.2.21", features = ["derive", "env"] }
+clap = { version = "4.1.6", features = ["derive", "env"] }
 csv = "1.1.6"
 directories = "4.0.1"
 flate2 = "1.0.24"

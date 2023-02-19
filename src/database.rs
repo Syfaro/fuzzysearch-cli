@@ -69,6 +69,7 @@ pub struct Item {
 
 /// A custom deserializer for bytes encoded as base64.
 mod b64_vec {
+    use base64::Engine;
     use serde::Deserialize;
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
@@ -76,7 +77,7 @@ mod b64_vec {
         D: serde::Deserializer<'de>,
     {
         let val = <Option<String>>::deserialize(deserializer)?
-            .map(base64::decode)
+            .map(|val| base64::engine::general_purpose::STANDARD.decode(val))
             .transpose()
             .map_err(serde::de::Error::custom)?;
 
@@ -87,9 +88,9 @@ mod b64_vec {
 /// Generate a URL for a given site and ID on that site.
 pub fn url_for(site: Site, site_id: i64) -> String {
     match site {
-        Site::FurAffinity => format!("https://www.furaffinity.net/view/{}/", site_id),
-        Site::E621 => format!("https://e621.net/post/show/{}", site_id),
-        Site::Weasyl => format!("https://www.weasyl.com/view/{}", site_id),
+        Site::FurAffinity => format!("https://www.furaffinity.net/view/{site_id}/"),
+        Site::E621 => format!("https://e621.net/post/show/{site_id}"),
+        Site::Weasyl => format!("https://www.weasyl.com/view/{site_id}"),
     }
 }
 

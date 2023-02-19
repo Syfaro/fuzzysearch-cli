@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::{collections::HashMap, convert::TryInto};
 
-use clap::{ArgEnum, Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use flate2::read::GzDecoder;
 use log::{debug, error, info, trace, warn};
@@ -32,14 +32,14 @@ struct MatchImagesOpts {
     /// FuzzySearch API key
     #[clap(
         long,
-        required_unless_present_any = &["database-path", "cached-database"],
+        required_unless_present_any = &["database_path", "cached_database"],
         env = "FUZZYSEARCH_API_KEY"
     )]
     api_key: Option<String>,
     /// FuzzySearch database dump path
     #[clap(
         long,
-        required_unless_present_any = &["api-key", "cached-database"],
+        required_unless_present_any = &["api_key", "cached_database"],
     )]
     database_path: Option<String>,
     /// Only use cached database values instead of re-reading dump
@@ -57,14 +57,14 @@ struct MatchImagesOpts {
     /// Path to folder containing images
     directory: String,
     /// How to output source information
-    #[clap(arg_enum)]
+    #[clap(value_enum)]
     action: Action,
     /// Where to output source information
     #[clap(default_value = "sources.txt")]
     output: String,
 }
 
-#[derive(Clone, Debug, ArgEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 enum Action {
     AllSources,
     PerFile,
@@ -177,7 +177,7 @@ fn match_images(opts: MatchImagesOpts) {
         .filter_map(|entry| {
             let path = entry.path().to_string_lossy();
 
-            stmt.query_map(&[&path], |row| row.get::<_, i64>(0))
+            stmt.query_map([&path], |row| row.get::<_, i64>(0))
                 .expect("could not query rows")
                 .find_map(|row| row.ok())
                 .map(|hash| (path.to_string(), hash))
@@ -240,7 +240,7 @@ fn match_images(opts: MatchImagesOpts) {
             sources.dedup();
 
             for source in sources {
-                f.write_all(format!("{}\n", source).as_bytes())
+                f.write_all(format!("{source}\n").as_bytes())
                     .expect("Unable to write source");
             }
         }
@@ -355,7 +355,7 @@ fn get_project_dirs() -> ProjectDirs {
 fn initialize_database() -> anyhow::Result<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>> {
     let project_dir = get_project_dirs();
     let data_dir = project_dir.data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    std::fs::create_dir_all(data_dir)?;
 
     let manager = SqliteConnectionManager::file(data_dir.join("hashes.db"));
     let pool = r2d2::Pool::new(manager)?;
@@ -410,7 +410,7 @@ fn collect_local_images(conn: &rusqlite::Connection, dir: &str) -> anyhow::Resul
 
     let mut files = 0;
 
-    for entry in walkdir::WalkDir::new(&dir) {
+    for entry in walkdir::WalkDir::new(dir) {
         let entry = entry?;
 
         trace!("Looking at {:?}", entry);
