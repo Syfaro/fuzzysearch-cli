@@ -1,5 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
+use log::debug;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -50,8 +51,8 @@ pub fn get_hashes(
     agent: &ureq::Agent,
     api_key: &str,
     hashes: &[i64],
-) -> anyhow::Result<HashMap<i64, Vec<File>>> {
-    let resp: Vec<File> = agent
+) -> anyhow::Result<(HashMap<i64, Vec<File>>, i16, i64)> {
+    let resp = agent
         .get("https://api-next.fuzzysearch.net/hashes")
         .set("X-Api-Key", api_key)
         .query(
@@ -63,19 +64,36 @@ pub fn get_hashes(
                 .join(","),
         )
         .query("distance", "3")
-        .call()?
-        .into_json()?;
+        .call()?;
+
+    let next_rate_limit: i16 = resp
+        .headers_names()
+        .into_iter()
+        .filter(|name| name.starts_with("x-rate-limit-remaining-"))
+        .flat_map(|name| resp.header(&name))
+        .flat_map(|remaining| remaining.parse())
+        .min()
+        .unwrap_or_default();
+    debug!("found next rate limit: {next_rate_limit}");
+
+    let rate_limit_reset: i64 = resp
+        .header("x-rate-limit-reset")
+        .and_then(|reset| reset.parse().ok())
+        .unwrap_or_default();
+    debug!("found rate limit reset: {rate_limit_reset}");
+
+    let files: Vec<File> = resp.into_json()?;
 
     let mut items: HashMap<i64, Vec<File>> = HashMap::new();
 
-    for item in resp {
+    for item in files {
         let entry = items
             .entry(item.searched_hash.expect("Missing searched hash"))
             .or_default();
         entry.push(item);
     }
 
-    Ok(items)
+    Ok((items, next_rate_limit, rate_limit_reset))
 }
 
 /// Generate a URL for a given File.
@@ -104,7 +122,6 @@ pub fn url_for_file(item: File) -> String {
 pub fn prepare_index(
     conn: &rusqlite::Connection,
     api_key: &str,
-    rate_limit: usize,
     lookup_count: usize,
 ) -> anyhow::Result<()> {
     let mut stmt = conn
@@ -130,9 +147,11 @@ pub fn prepare_index(
 
     let agent = ureq::agent();
 
+    let mut next_chunk_size = 10;
+
     loop {
         let rows: Vec<(i32, i64)> = stmt
-            .query_map([rate_limit], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([next_chunk_size], |row| Ok((row.get(0)?, row.get(1)?)))
             .expect("Unable to lookup items needing resolution")
             .filter_map(|row| row.ok())
             .collect();
@@ -141,53 +160,49 @@ pub fn prepare_index(
             break;
         }
 
-        let start = std::time::Instant::now();
+        let items: Vec<_> = rows.iter().map(|row| row.1).collect();
 
-        let mut lookup = std::collections::HashMap::new();
-        for row in rows.iter() {
-            lookup.insert(row.1, row.0);
-        }
-
-        for chunk in rows.chunks(10) {
-            let items: Vec<_> = chunk.iter().map(|chunk| chunk.1).collect();
-
-            let hashes = loop {
-                match get_hashes(&agent, api_key, &items) {
-                    Ok(hashes) => break hashes,
-                    Err(err) => {
-                        pb.set_message(format!("Got API error, retrying in 30 seconds: {err}"));
-                        std::thread::sleep(std::time::Duration::from_secs(30));
-                        pb.set_message("");
-                    }
-                }
-            };
-
-            for item in chunk.iter() {
-                if let Some(files) = hashes.get(&item.1) {
-                    let data =
-                        serde_json::to_string(&files).expect("Unable to serialize hash lookup");
-
-                    insert_stmt
-                        .execute(rusqlite::params![item.1, &data])
-                        .expect("Unable to insert hash lookup data");
-
-                    let hash_id = conn.last_insert_rowid();
-                    update_stmt
-                        .execute(rusqlite::params![hash_id, item.0])
-                        .expect("Unable to update cache with hash data ID");
-                } else {
-                    update_stmt
-                        .execute(rusqlite::params![rusqlite::types::Null, item.0])
-                        .expect("Unable to set hash lookup to None");
+        let (hashes, next_rate_limit, rate_limit_reset) = loop {
+            match get_hashes(&agent, api_key, &items) {
+                Ok(hashes) => break hashes,
+                Err(err) => {
+                    debug!("API error: {err}");
+                    pb.set_message("Got API error, retrying in 30 seconds");
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    pb.set_message("");
                 }
             }
+        };
 
-            pb.inc(chunk.len() as u64);
+        for item in rows.iter() {
+            if let Some(files) = hashes.get(&item.1) {
+                let data = serde_json::to_string(&files).expect("Unable to serialize hash lookup");
+
+                insert_stmt
+                    .execute(rusqlite::params![item.1, &data])
+                    .expect("Unable to insert hash lookup data");
+
+                let hash_id = conn.last_insert_rowid();
+                update_stmt
+                    .execute(rusqlite::params![hash_id, item.0])
+                    .expect("Unable to update cache with hash data ID");
+            } else {
+                update_stmt
+                    .execute(rusqlite::params![rusqlite::types::Null, item.0])
+                    .expect("Unable to set hash lookup to None");
+            }
         }
 
-        let delay = 61 - start.elapsed().as_secs();
-        if delay > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(delay));
+        pb.inc(rows.len() as u64);
+
+        if next_rate_limit == 0 {
+            let secs = u64::try_from(rate_limit_reset).unwrap_or_default() + 1;
+            pb.set_message(format!("Reached rate limit, waiting {secs} seconds"));
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            pb.set_message("");
+            next_chunk_size = 10;
+        } else {
+            next_chunk_size = next_rate_limit.clamp(0, 10);
         }
     }
 

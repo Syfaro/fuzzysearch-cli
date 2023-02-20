@@ -45,9 +45,6 @@ struct MatchImagesOpts {
     /// Only use cached database values instead of re-reading dump
     #[clap(short, long)]
     cached_database: bool,
-    /// API limit per minute
-    #[clap(short, long, default_value = "60")]
-    limit: usize,
     /// Move matched items to directory
     #[clap(long)]
     move_matched: Option<String>,
@@ -157,7 +154,7 @@ fn match_images(opts: MatchImagesOpts) {
     } else if let Some(api_key) = opts.api_key {
         info!("Performing lookups");
 
-        fuzzysearch::prepare_index(&conn, &api_key, opts.limit, lookup_count)
+        fuzzysearch::prepare_index(&conn, &api_key, lookup_count)
             .expect("Could not perform lookup");
 
         None
