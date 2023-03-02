@@ -125,7 +125,7 @@ pub fn prepare_index(
     lookup_count: usize,
 ) -> anyhow::Result<()> {
     let mut stmt = conn
-        .prepare("SELECT id, hash FROM cache WHERE looked_up = FALSE LIMIT ?1")
+        .prepare("SELECT id, hash FROM cache WHERE hash IS NOT NULL AND looked_up = FALSE LIMIT ?1")
         .expect("Unable to prepare query to lookup items needing resolution");
 
     let mut insert_stmt = conn
