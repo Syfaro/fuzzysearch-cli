@@ -175,7 +175,6 @@ pub fn prepare_index(
                 }
             }
         };
-        debug!("next rate limit: {next_rate_limit}");
 
         for item in rows.iter() {
             if let Some(files) = hashes.get(&item.1) {
