@@ -35,5 +35,5 @@ jobs:
       - uses: actions/upload-artifact@v2
         name: Upload artifact
         with:
-          name: Save FuzzySearch-CLI Windows x86_64
+          name: fuzzysearch-cli.exe
           path: target/release/fuzzysearch-cli.exe
