@@ -157,6 +157,7 @@ pub fn prepare_index(
             .collect();
 
         if rows.is_empty() {
+            debug!("Rows was empty");
             break;
         }
 
@@ -202,8 +203,9 @@ pub fn prepare_index(
             pb.set_message("");
             next_chunk_size = 10;
         } else {
-            next_chunk_size = next_rate_limit.clamp(0, 10);
+            next_chunk_size = next_rate_limit.clamp(1, 10);
         }
+        debug!("Calculated next chunk size: {next_chunk_size}");
     }
 
     pb.abandon();
