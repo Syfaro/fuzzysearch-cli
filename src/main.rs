@@ -304,7 +304,7 @@ fn hash_image(id: i32, path: String) -> Option<ImageInfo> {
 
     let hash: [u8; 8] = bytes.try_into().ok()?;
 
-    debug!("Hashed {}", path.display());
+    debug!("hashed {}", path.display());
 
     Some(ImageInfo { id, hash })
 }

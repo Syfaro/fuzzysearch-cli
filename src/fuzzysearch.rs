@@ -150,6 +150,7 @@ pub fn prepare_index(
     let mut next_chunk_size = 10;
 
     loop {
+        debug!("using chunk size: {next_chunk_size}");
         let rows: Vec<(i32, i64)> = stmt
             .query_map([next_chunk_size], |row| Ok((row.get(0)?, row.get(1)?)))
             .expect("Unable to lookup items needing resolution")
@@ -157,7 +158,7 @@ pub fn prepare_index(
             .collect();
 
         if rows.is_empty() {
-            debug!("Rows was empty");
+            debug!("rows was empty");
             break;
         }
 
@@ -167,13 +168,14 @@ pub fn prepare_index(
             match get_hashes(&agent, api_key, &items) {
                 Ok(hashes) => break hashes,
                 Err(err) => {
-                    debug!("API error: {err}");
+                    debug!("api error: {err}");
                     pb.set_message("Got API error, retrying in 30 seconds");
                     std::thread::sleep(std::time::Duration::from_secs(30));
                     pb.set_message("");
                 }
             }
         };
+        debug!("next rate limit: {next_rate_limit}");
 
         for item in rows.iter() {
             if let Some(files) = hashes.get(&item.1) {
@@ -205,7 +207,6 @@ pub fn prepare_index(
         } else {
             next_chunk_size = next_rate_limit.clamp(1, 10);
         }
-        debug!("Calculated next chunk size: {next_chunk_size}");
     }
 
     pb.abandon();
