@@ -96,12 +96,33 @@ fn download_database(path: String) {
     let resp = ureq::get(&url)
         .call()
         .expect("Could not start database download");
-    let reader = resp.into_reader();
+
+    let content_length: Option<u64> = resp
+        .header("content-length")
+        .and_then(|content_length| content_length.parse().ok());
+
+    let reader = if let Some(content_length) = content_length {
+        let pb = indicatif::ProgressBar::new(content_length);
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "{bytes_per_sec} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+            )
+            .unwrap(),
+        );
+        Box::new(pb.wrap_read(resp.into_reader()))
+    } else {
+        resp.into_reader()
+    };
+
     let mut decompressor = GzDecoder::new(reader);
 
     let len = std::io::copy(&mut decompressor, &mut file).expect("Could not save database file");
 
-    log::info!("Download complete! Database was {} bytes.", len);
+    log::info!(
+        "Download complete! Database is {} after decompression.",
+        indicatif::HumanBytes(len)
+    );
 }
 
 fn match_images(opts: MatchImagesOpts) {
